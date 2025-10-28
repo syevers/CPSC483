@@ -586,5 +586,16 @@ scaler = StandardScaler()
 data[num_cols] = scaler.fit_transform(data[num_cols])
 
 
+#--------look for correlations---------
+# correlation matrix
+corr_matrix = data.corr()
+
+# print correlation with the target
+target_corr = corr_matrix["overall_rating"].sort_values(ascending=False)
+print("Correlation of features with overall_rating:\n", target_corr)
+
+# full correlation matrix
+print("\nFull correlation matrix:\n", corr_matrix)
+
 if __name__ == "__main__":
     main()
