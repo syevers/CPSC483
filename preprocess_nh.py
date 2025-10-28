@@ -556,6 +556,25 @@ def main():
                  measure_dir_config=cfg)
 
 #----------handling outliers-------------
+#load the datasets
+files = {
+    "provider":     "NH_ProviderInfo_Sep2025.csv",
+    "penalties":    "NH_Penalties_Sep2025.csv",
+    "survey_dates": "NH_SurveyDates_Sep2025.csv",
+    "survey_sum":   "NH_SurveySummary_Sep2025.csv",
+    "health_cit":   "NH_HealthCitations_Sep2025.csv",
+    "vbp":          "FY_2025_SNF_VBP_Facility_Performance.csv",
+    "bench":        "NH_StateUSAverages_Sep2025.csv",
+    "qm_claims":    "NH_QualityMsr_Claims_Sep2025.csv",
+    "qm_mds":       "NH_QualityMsr_MDS_Sep2025.csv"
+}
+
+datasets = {name: pd.read_csv(path) for name, path in files.items()}
+
+data = datasets["provider"]
+for name in ["penalties", "survey_dates", "survey_sum", "health_cit", "vbp", "bench", "qm_claims", "qm_mds"]:
+    data = data.merge(datasets[name], on="CCN", how="left")
+
 #def function to remove outliers 
 def remove_outliers_iqr(df, cols, multiplier=1.5):
     df = df.copy()
