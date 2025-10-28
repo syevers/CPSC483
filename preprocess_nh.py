@@ -27,6 +27,8 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import unicodedata
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
 
 try:
     import yaml
@@ -552,6 +554,37 @@ def main():
                  months_window=args.months_window,
                  min_count_rare=args.min_count_rare,
                  measure_dir_config=cfg)
+
+#----------handling outliers-------------
+#def function to remove outliers 
+def remove_outliers_iqr(df, cols, multiplier=1.5):
+    df = df.copy()
+    for col in cols:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            Q1 = df[col].quantile(0.25)
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower = Q1 - multiplier * IQR
+            upper = Q3 + multiplier * IQR
+            df = df[(df[col] >= lower) & (df[col] <= upper)]
+    return df
+
+# identify numeric and categorical columns
+num_cols = data.select_dtypes(include=[np.number]).columns
+cat_cols = data.select_dtypes(exclude=[np.number]).columns
+# handle missing values
+num_imputer = SimpleImputer(strategy='median')
+cat_imputer = SimpleImputer(strategy='most_frequent')
+data[num_cols] = num_imputer.fit_transform(data[num_cols])
+data[cat_cols] = cat_imputer.fit_transform(data[cat_cols])
+# remove outliers 
+data = remove_outliers_iqr(data, num_cols)
+# encode categorical variables
+data = pd.get_dummies(data, drop_first=True)
+# scale numeric features
+scaler = StandardScaler()
+data[num_cols] = scaler.fit_transform(data[num_cols])
+
 
 if __name__ == "__main__":
     main()
