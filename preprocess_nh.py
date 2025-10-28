@@ -10,25 +10,15 @@ Preprocess NH datasets into a single model-ready feature table (one row per CCN)
 - Encodings: one-hot (low-card handled downstream) + frequency encoding (high-card).
 - Outputs cleaned domain tables + Gold feature table.
 
-USAGE (examples):
-  python preprocess_nh.py --data-dir "/mnt/data" --out-dir "/mnt/data/outputs"
-  python preprocess_nh.py --data-dir "/mnt/data" --out-dir "/mnt/data/outputs" --months-window 36 \
-    --measure-direction-config "/mnt/data/measure_direction.yaml"
-
-Notes:
-  - Robust to column-name variation via fuzzy token matching.
-  - If NH_StateUSAverages_Sep2025.csv lacks std columns, std is computed from your QM data.
-  - Optional YAML (measure_direction.yaml) sets which QMs are lower-is-better (flip sign).
+RUN:  python preprocess_nh.py
+  (data_dir is the script's directory; outputs go to ./outputs)
 """
 
-import argparse
 import re
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import unicodedata
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
 
 try:
     import yaml
@@ -128,12 +118,11 @@ def derive_ccn_strict(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def parse_any_date(s: pd.Series) -> pd.Series:
-    try:
-        return pd.to_datetime(s, errors="coerce", utc=False, infer_datetime_format=True)
-    except Exception:
-        return pd.to_datetime(pd.Series([pd.NA]*len(s)), errors="coerce")
+    # Removed deprecated infer_datetime_format
+    return pd.to_datetime(s, errors="coerce", utc=False)
 
 def read_csv_loose(p: Path) -> pd.DataFrame:
+    # Force all columns as strings to make .str operations safe
     return pd.read_csv(p, dtype=str, low_memory=False)
 
 # ------------------- Domain loaders -------------------
@@ -142,17 +131,14 @@ def load_provider_info(path: Path) -> pd.DataFrame:
     df = normalize_columns(df)
     df = derive_ccn_strict(df)
 
-    # numeric coercions
+    # numeric coercions (cast to str first for .str ops)
     numeric_like = [
         "number_of_certified_beds","average_number_of_residents_per_day",
         "overall_rating","staffing_rating","rn_staffing_rating","qm_rating"
     ]
     for col in df.columns:
         if any(x in col for x in numeric_like):
-            try:
-                df[col] = pd.to_numeric(df[col].str.replace(r"[,$%]", "", regex=True), errors="coerce")
-            except Exception:
-                pass
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(r"[,$%]", "", regex=True), errors="coerce")
 
     # state & text
     if "state" in df.columns:
@@ -182,7 +168,10 @@ def load_penalties(path: Path, months_window: int = 36) -> pd.DataFrame:
     amt_cols = [c for c in df.columns if any(t in c for t in ["fine","amount","penalty","cmp"])]
     ac = amt_cols[0] if amt_cols else None
     if ac:
-        df[ac] = pd.to_numeric(df[ac].str.replace(r"[,$%]", "", regex=True), errors="coerce")
+        df[ac] = pd.to_numeric(
+            df[ac].astype(str).str.replace(r"[,$%]", "", regex=True),
+            errors="coerce"
+        )
 
     # payment denial flag
     pd_cols = [c for c in df.columns if "denial" in c or "payment_denial" in c]
@@ -237,7 +226,7 @@ def load_survey_summary(path: Path) -> pd.DataFrame:
     df = derive_ccn_strict(df)
     for col in df.columns:
         if any(tok in col for tok in ["count","complaint","revisit","deficien","tag"]):
-            df[col] = pd.to_numeric(df[col].str.replace(r"[,$%]", "", regex=True), errors="coerce")
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(r"[,$%]", "", regex=True), errors="coerce")
     out = df.groupby("ccn", as_index=False).sum(numeric_only=True)
     return out
 
@@ -282,7 +271,7 @@ def load_vbp(path: Path) -> pd.DataFrame:
     cand = [c for c in df.columns if "multiplier" in c or "incentive" in c]
     if cand:
         col = cand[0]
-        df[col] = pd.to_numeric(df[col].str.replace(r"[,$%]", "", regex=True), errors="coerce")
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(r"[,$%]", "", regex=True), errors="coerce")
         return df[["ccn", col]].rename(columns={col:"vbp_incentive_multiplier"}).drop_duplicates("ccn")
     return pd.DataFrame({"ccn":[], "vbp_incentive_multiplier":[]})
 
@@ -328,7 +317,7 @@ def load_qm_long(path: Path, source_label: str) -> pd.DataFrame:
 
     if ps: df[ps] = parse_any_date(df[ps])
     if pe: df[pe] = parse_any_date(df[pe])
-    if val: df[val] = pd.to_numeric(df[val].str.replace(r"[,$%]", "", regex=True), errors="coerce")
+    if val: df[val] = pd.to_numeric(df[val].astype(str).str.replace(r"[,$%]", "", regex=True), errors="coerce")
 
     keep = ["ccn"]
     if mid: keep.append(mid)
@@ -404,10 +393,13 @@ def frequency_encode(df: pd.DataFrame, col: str) -> pd.Series:
     return df[col].map(freqs).fillna(0)
 
 # ------------------- Pipeline -------------------
-def run_pipeline(data_dir: Path, out_dir: Path, months_window: int = 36, min_count_rare=50, measure_dir_config: Path = None):
+def run_pipeline():
+    script_dir = Path(__file__).resolve().parent
+    data_dir = script_dir
+    out_dir = script_dir / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Inputs (adjust names if your files differ)
+    # Inputs (expected names; if missing, that domain is skipped gracefully)
     p_provider     = data_dir / "NH_ProviderInfo_Sep2025.csv"
     p_penalties    = data_dir / "NH_Penalties_Sep2025.csv"
     p_survey_dates = data_dir / "NH_SurveyDates_Sep2025.csv"
@@ -417,12 +409,14 @@ def run_pipeline(data_dir: Path, out_dir: Path, months_window: int = 36, min_cou
     p_bench        = data_dir / "NH_StateUSAverages_Sep2025.csv"
     p_qm_claims    = data_dir / "NH_QualityMsr_Claims_Sep2025.csv"
     p_qm_mds       = data_dir / "NH_QualityMsr_MDS_Sep2025.csv"
+    p_measure_cfg  = data_dir / "measure_direction.yaml"
 
+    # Load
     provider  = load_provider_info(p_provider) if p_provider.exists() else pd.DataFrame()
-    penalties = load_penalties(p_penalties, months_window) if p_penalties.exists() else pd.DataFrame(columns=["ccn","penalty_events_36mo","total_fines_usd_36mo","had_any_payment_denial"])
+    penalties = load_penalties(p_penalties, months_window=36) if p_penalties.exists() else pd.DataFrame(columns=["ccn","penalty_events_36mo","total_fines_usd_36mo","had_any_payment_denial"])
     surv_dates= load_survey_dates(p_survey_dates) if p_survey_dates.exists() else pd.DataFrame(columns=["ccn","last_health_survey_date","days_since_last_health_survey"])
     surv_sum  = load_survey_summary(p_survey_sum) if p_survey_sum.exists() else pd.DataFrame(columns=["ccn"])
-    citations = load_health_citations(p_health_cit, months_window) if p_health_cit.exists() else pd.DataFrame(columns=["ccn","severity_weight_sum_36mo"])
+    citations = load_health_citations(p_health_cit, months_window=36) if p_health_cit.exists() else pd.DataFrame(columns=["ccn","severity_weight_sum_36mo"])
     vbp       = load_vbp(p_vbp) if p_vbp.exists() else pd.DataFrame(columns=["ccn","vbp_incentive_multiplier"])
     bench     = load_state_us_benchmarks(p_bench) if p_bench.exists() else None
 
@@ -434,7 +428,7 @@ def run_pipeline(data_dir: Path, out_dir: Path, months_window: int = 36, min_cou
     qm_all    = pd.concat([qm_claims, qm_mds], ignore_index=True) if not (qm_claims.empty and qm_mds.empty) else pd.DataFrame(columns=["ccn","measure_id","value","period_start","period_end","source"])
 
     if not qm_all.empty:
-        lower_is_better = load_measure_direction(measure_dir_config)
+        lower_is_better = load_measure_direction(p_measure_cfg)
         if lower_is_better:
             mask = qm_all["measure_id"].isin(lower_is_better)
             qm_all.loc[mask, "value"] = -qm_all.loc[mask, "value"]  # flip so "higher is better"
@@ -446,8 +440,8 @@ def run_pipeline(data_dir: Path, out_dir: Path, months_window: int = 36, min_cou
     # Assemble Gold
     base_cols = ["ccn","state","number_of_certified_beds","average_number_of_residents_per_day",
                  "overall_rating","staffing_rating","rn_staffing_rating","qm_rating"]
-    base_cols = [c for c in base_cols if c in provider.columns] + ["ccn"]  # safe subset
-    base_cols = list(dict.fromkeys(base_cols))  # unique, keep order
+    base_cols = [c for c in base_cols if c in provider.columns] + ["ccn"]  # ensure ccn
+    base_cols = list(dict.fromkeys(base_cols))  # unique order
 
     gold = provider[base_cols].copy()
     for c in ["ownership_type","chain_owner","in_hospital","sprinkler_status",
@@ -481,7 +475,7 @@ def run_pipeline(data_dir: Path, out_dir: Path, months_window: int = 36, min_cou
     for c in HIGH_CARD_DEFAULT:
         if c in gold.columns:
             gold[c] = normalize_cats(gold[c])
-            gold[c] = bucket_rare_levels(gold[c], min_count=min_count_rare, other_label="Other")
+            gold[c] = bucket_rare_levels(gold[c], min_count=50, other_label="Other")
 
     # Missingness + impute numerics (by-state if available)
     numeric_cols = [c for c in gold.columns if any(tok in c for tok in
@@ -511,14 +505,13 @@ def run_pipeline(data_dir: Path, out_dir: Path, months_window: int = 36, min_cou
             gold[c + "_freq"] = frequency_encode(gold, c)
 
     # Save
-    out_dir.mkdir(parents=True, exist_ok=True)
     if not provider.empty:  provider.to_csv(out_dir / "clean_provider_info.csv", index=False)
     if not penalties.empty: penalties.to_csv(out_dir / "clean_penalties_36mo.csv", index=False)
     if not surv_dates.empty:surv_dates.to_csv(out_dir / "clean_survey_dates.csv", index=False)
     if not surv_sum.empty:  surv_sum.to_csv(out_dir / "clean_survey_summary.csv", index=False)
     if not citations.empty: citations.to_csv(out_dir / "clean_health_citations_36mo.csv", index=False)
     if not vbp.empty:       vbp.to_csv(out_dir / "clean_vbp.csv", index=False)
-    if not qm_all.empty:    qm_all.to_csv(out_dir / "clean_qm_long.csv", index=False)
+    if "qm_all" in locals() and not qm_all.empty:    qm_all.to_csv(out_dir / "clean_qm_long.csv", index=False)
     if not qm_fac.empty:    qm_fac.to_csv(out_dir / "clean_qm_facility_zscores.csv", index=False)
 
     gold = gold.drop_duplicates(subset=["ccn"], keep="first")
@@ -535,47 +528,8 @@ def run_pipeline(data_dir: Path, out_dir: Path, months_window: int = 36, min_cou
     report_lines.append("Key derived: severity_rate_per_100_beds, penalties_36mo, days_since_last_health_survey, qm_domain_z_state/us, vbp_incentive_multiplier")
     (out_dir / "NH_Preprocessing_Report.txt").write_text("\n".join(report_lines), encoding="utf-8")
 
-    return gold
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data-dir", type=str, required=True, help="Directory with input CSVs")
-    ap.add_argument("--out-dir", type=str, required=True, help="Directory to write outputs")
-    ap.add_argument("--months-window", type=int, default=36, help="Window in months for penalties/citations")
-    ap.add_argument("--min-count-rare", type=int, default=50, help="Rare-category cutoff for HIGH_CARD columns")
-    ap.add_argument("--measure-direction-config", type=str, default="", help="YAML with list lower_is_better: [measure_id,...]")
-    args = ap.parse_args()
-
-    data_dir = Path(args.data_dir)
-    out_dir = Path(args.out_dir)
-    cfg = Path(args.measure_direction_config) if args.measure_direction_config else None
-
-    run_pipeline(data_dir, out_dir,
-                 months_window=args.months_window,
-                 min_count_rare=args.min_count_rare,
-                 measure_dir_config=cfg)
-
 #----------handling outliers-------------
-#load the datasets
-files = {
-    "provider":     "NH_ProviderInfo_Sep2025.csv",
-    "penalties":    "NH_Penalties_Sep2025.csv",
-    "survey_dates": "NH_SurveyDates_Sep2025.csv",
-    "survey_sum":   "NH_SurveySummary_Sep2025.csv",
-    "health_cit":   "NH_HealthCitations_Sep2025.csv",
-    "vbp":          "FY_2025_SNF_VBP_Facility_Performance.csv",
-    "bench":        "NH_StateUSAverages_Sep2025.csv",
-    "qm_claims":    "NH_QualityMsr_Claims_Sep2025.csv",
-    "qm_mds":       "NH_QualityMsr_MDS_Sep2025.csv"
-}
-
-datasets = {name: pd.read_csv(path) for name, path in files.items()}
-
-data = datasets["provider"]
-for name in ["penalties", "survey_dates", "survey_sum", "health_cit", "vbp", "bench", "qm_claims", "qm_mds"]:
-    data = data.merge(datasets[name], on="CCN", how="left")
-
-#def function to remove outliers 
+#def function to remove outliers
 def remove_outliers_iqr(df, cols, multiplier=1.5):
     df = df.copy()
     for col in cols:
@@ -588,33 +542,35 @@ def remove_outliers_iqr(df, cols, multiplier=1.5):
             df = df[(df[col] >= lower) & (df[col] <= upper)]
     return df
 
-# identify numeric and categorical columns
-num_cols = data.select_dtypes(include=[np.number]).columns
-cat_cols = data.select_dtypes(exclude=[np.number]).columns
-# handle missing values
-num_imputer = SimpleImputer(strategy='median')
-cat_imputer = SimpleImputer(strategy='most_frequent')
-data[num_cols] = num_imputer.fit_transform(data[num_cols])
-data[cat_cols] = cat_imputer.fit_transform(data[cat_cols])
-# remove outliers 
-data = remove_outliers_iqr(data, num_cols)
-# encode categorical variables
-data = pd.get_dummies(data, drop_first=True)
-# scale numeric features
-scaler = StandardScaler()
-data[num_cols] = scaler.fit_transform(data[num_cols])
+    # identify numeric and categorical columns
+    num_cols = data.select_dtypes(include=[np.number]).columns
+    cat_cols = data.select_dtypes(exclude=[np.number]).columns
+    # handle missing values
+    num_imputer = SimpleImputer(strategy='median')
+    cat_imputer = SimpleImputer(strategy='most_frequent')
+    data[num_cols] = num_imputer.fit_transform(data[num_cols])
+    data[cat_cols] = cat_imputer.fit_transform(data[cat_cols])
+    # remove outliers
+    data = remove_outliers_iqr(data, num_cols)
+    # encode categorical variables
+    data = pd.get_dummies(data, drop_first=True)
+    # scale numeric features
+    scaler = StandardScaler()
+    data[num_cols] = scaler.fit_transform(data[num_cols])
 
+    
+    #--------look for correlations---------
+    # correlation matrix
+    corr_matrix = data.corr()
 
-#--------look for correlations---------
-# correlation matrix
-corr_matrix = data.corr()
-
-# print correlation with the target
-target_corr = corr_matrix["overall_rating"].sort_values(ascending=False)
-print("Correlation of features with overall_rating:\n", target_corr)
-
-# full correlation matrix
-print("\nFull correlation matrix:\n", corr_matrix)
+    # print correlation with the target
+    target_corr = corr_matrix["overall_rating"].sort_values(ascending=False)
+    print("Correlation of features with overall_rating:\n", target_corr)
+    
+    # full correlation matrix
+    print("\nFull correlation matrix:\n", corr_matrix)
+def main():
+    run_pipeline()
 
 if __name__ == "__main__":
     main()
